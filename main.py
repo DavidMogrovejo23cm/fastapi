@@ -1,5 +1,6 @@
 from typing import Union, Optional, List
 from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware  # AGREGADO: Importación CORS
 from sqlalchemy.orm import Session
 import secrets
 import string
@@ -9,6 +10,7 @@ from database import get_db, create_tables, QRCode, RegistroEscaneo
 from sqlalchemy import desc
 import httpx
 import asyncio
+import traceback  # AGREGADO: Para mejor debugging
 
 # Importación condicional de qrcode
 try:
@@ -89,6 +91,20 @@ app = FastAPI(
     ]
 )
 
+# ============= CONFIGURACIÓN CORS =============
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:4200",      # Angular development
+        "http://localhost:3000",      # React development (si aplica)
+        "https://tu-frontend-domain.com",  # Tu dominio de producción
+        "*"  # TEMPORAL: Permite todos los orígenes para debugging
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
+
 # Reiniciar la base de datos al iniciar (elimina esquema anterior)
 print("🚀 Iniciando aplicación integrada...")
 
@@ -142,14 +158,18 @@ class AttendanceStatsResponse(BaseModel):
 async def get_employee_by_id(empleado_id: int) -> Optional[EmployeeInfo]:
     """Obtiene información del empleado desde el backend NestJS"""
     try:
+        print(f"🔍 Consultando empleado {empleado_id} en {NESTJS_BACKEND_URL}")
         async with httpx.AsyncClient() as client:
             response = await client.get(
                 f"{NESTJS_BACKEND_URL}/user/{empleado_id}",
                 timeout=10.0
             )
             
+            print(f"📡 Respuesta del backend: {response.status_code}")
+            
             if response.status_code == 200:
                 user_data = response.json()
+                print(f"✅ Empleado encontrado: {user_data}")
                 return EmployeeInfo(
                     id=user_data["id"],
                     name=user_data["name"],
@@ -157,9 +177,10 @@ async def get_employee_by_id(empleado_id: int) -> Optional[EmployeeInfo]:
                     role=user_data["role"]
                 )
             elif response.status_code == 404:
+                print(f"❌ Empleado {empleado_id} no encontrado")
                 return None
             else:
-                print(f"❌ Error obteniendo empleado {empleado_id}: {response.status_code}")
+                print(f"❌ Error obteniendo empleado {empleado_id}: {response.status_code} - {response.text}")
                 return None
                 
     except httpx.TimeoutException:
@@ -167,6 +188,7 @@ async def get_employee_by_id(empleado_id: int) -> Optional[EmployeeInfo]:
         return None
     except Exception as e:
         print(f"❌ Error de conexión obteniendo empleado {empleado_id}: {e}")
+        print(f"🔍 Traceback completo: {traceback.format_exc()}")
         return None
 
 async def get_all_employees() -> List[EmployeeInfo]:
@@ -342,24 +364,45 @@ async def get_employee(empleado_id: int):
 @app.get("/employees/{empleado_id}/qr", response_model=Optional[QRCodeResponse], tags=["Employees"])
 async def get_employee_qr(empleado_id: int, db: Session = Depends(get_db)):
     """🔍 Obtiene el QR código de un empleado específico si existe"""
-    # Verificar que el empleado existe
-    employee = await get_employee_by_id(empleado_id)
-    if not employee:
+    try:
+        print(f"🔍 Procesando solicitud de QR para empleado {empleado_id}")
+        
+        # Verificar que el empleado existe
+        print(f"🔍 Verificando existencia del empleado {empleado_id}")
+        employee = await get_employee_by_id(empleado_id)
+        if not employee:
+            print(f"❌ Empleado {empleado_id} no encontrado en backend NestJS")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Empleado con ID {empleado_id} no encontrado en el sistema"
+            )
+        
+        print(f"✅ Empleado encontrado: {employee.name}")
+        
+        # Buscar QR existente
+        print(f"🔍 Buscando QR existente para empleado {empleado_id}")
+        existing_qr = db.query(QRCode).filter(
+            QRCode.empleado_id == empleado_id,
+            QRCode.activo == True
+        ).first()
+        
+        if existing_qr:
+            print(f"✅ QR encontrado: ID {existing_qr.id}")
+            return await qr_to_response(existing_qr, db)
+        else:
+            print(f"⚠️ No se encontró QR para empleado {empleado_id}")
+            return None
+            
+    except HTTPException:
+        # Re-lanzar HTTPExceptions
+        raise
+    except Exception as e:
+        print(f"❌ Error interno en get_employee_qr: {e}")
+        print(f"🔍 Traceback completo: {traceback.format_exc()}")
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Empleado con ID {empleado_id} no encontrado en el sistema"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error interno del servidor: {str(e)}"
         )
-    
-    # Buscar QR existente
-    existing_qr = db.query(QRCode).filter(
-        QRCode.empleado_id == empleado_id,
-        QRCode.activo == True
-    ).first()
-    
-    if existing_qr:
-        return await qr_to_response(existing_qr, db)
-    else:
-        return None
 
 # ============= ENDPOINTS DE QR CODES INTEGRADOS =============
 
@@ -1221,4 +1264,5 @@ if __name__ == "__main__":
     print(f"🚀 Iniciando servidor en puerto {port}")
     print(f"🌐 Backend NestJS: {NESTJS_BACKEND_URL}")
     print(f"📱 QR disponible: {QR_AVAILABLE}")
+    print(f"🔧 CORS configurado para localhost:4200")
     uvicorn.run(app, host="0.0.0.0", port=port)
