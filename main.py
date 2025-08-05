@@ -1,4 +1,4 @@
-from typing import Union, Optional, List
+from typing import Union, Optional, List, Dict, Any
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware  # AGREGADO: Importación CORS
 from sqlalchemy.orm import Session
@@ -23,6 +23,12 @@ except ImportError:
 
 # URL del backend NestJS
 NESTJS_BACKEND_URL = "https://backtofastapi-production.up.railway.app"
+
+# --- INICIO DE MODIFICACIONES PARA NOTIFICACIONES HTTP ---
+# 1. "Buzón" en memoria para guardar el último evento de escaneo por ID de empleado.
+#    Formato: { empleado_id: { "message": "...", "type": "ENTRADA" | "SALIDA", "empleado_name": "..." } }
+last_scan_events: Dict[int, Dict[str, Any]] = {}
+# --- FIN DE MODIFICACIONES ---
 
 app = FastAPI(
     title="QR Attendance API - Integrado con NestJS",
@@ -152,6 +158,13 @@ class AttendanceStatsResponse(BaseModel):
     empleados_registrados: int
     escaneos_hoy: int
     backend_status: str
+
+# Nuevo modelo para la respuesta de notificación HTTP
+class ScanNotificationResponse(BaseModel):
+    message: str
+    type: str
+    empleado_name: str
+    timestamp: str
 
 # ============= FUNCIONES PARA CONSUMIR BACKEND NESTJS =============
 
@@ -410,25 +423,6 @@ async def get_employee_qr(empleado_id: int, db: Session = Depends(get_db)):
 async def generate_qr(request: QRGenerationRequest, db: Session = Depends(get_db)):
     """
     ## 🎯 Genera un nuevo código QR para un empleado (con validación en NestJS)
-
-    **Comportamiento:**
-    - Valida que el empleado existe en el backend NestJS
-    - Si el empleado ya tiene un QR activo, devuelve el existente
-    - Si no tiene QR, crea uno nuevo
-    - El QR es único y reutilizable diariamente
-
-    **Validaciones:**
-    - Empleado debe existir en el sistema NestJS
-    - Solo empleados válidos pueden tener QR
-
-    **Parámetros:**
-    - `empleado_id`: ID único del empleado (validado contra NestJS)
-
-    **Respuesta:**
-    - Información completa del QR generado
-    - Datos del empleado desde NestJS
-    - Código QR en formato base64
-    - Total de escaneos realizados
     """
 
     # PASO 1: Validar que el empleado existe en el backend NestJS
@@ -480,17 +474,6 @@ async def generate_qr(request: QRGenerationRequest, db: Session = Depends(get_db
 async def validate_qr(qr_id: int, db: Session = Depends(get_db)):
     """
     ## ✅ Valida un código QR y determina la próxima acción (con info del empleado)
-
-    **Comportamiento:**
-    - Verifica si el QR existe y está activo
-    - Valida que el empleado aún existe en el backend NestJS
-    - Determina si el próximo escaneo será ENTRADA o SALIDA
-    - Informa si ya completó entrada y salida del día
-
-    **Respuestas posibles:**
-    - `ENTRADA`: Primer escaneo del día
-    - `SALIDA`: Ya tiene entrada, registrará salida
-    - `COMPLETADO`: Ya registró entrada y salida hoy
     """
 
     qr_code = db.query(QRCode).filter(QRCode.id == qr_id).first()
@@ -560,17 +543,7 @@ async def validate_qr(qr_id: int, db: Session = Depends(get_db)):
 async def record_scan(qr_id: int, db: Session = Depends(get_db)):
     """
     ## 📱 Registra un escaneo del código QR (entrada o salida) con validación de empleado
-
-    **Lógica del sistema:**
-    - **Validación**: Verifica que el empleado existe en NestJS
-    - **Primer escaneo del día**: Registra ENTRADA con hora actual
-    - **Segundo escaneo del día**: Actualiza el registro con SALIDA
-    - **Tercer escaneo**: Error - ya completó entrada y salida
-
-    **Cálculos automáticos:**
-    - Duración de jornada cuando hay salida
-    - Fecha del registro
-    - Validación de QR activo y empleado válido
+    - Modificado para guardar el evento de escaneo en un "buzón" en memoria para notificaciones.
     """
 
     # Verificar que el QR existe y está activo
@@ -605,6 +578,9 @@ async def record_scan(qr_id: int, db: Session = Depends(get_db)):
         RegistroEscaneo.fecha >= datetime.combine(hoy, datetime.min.time()),
         RegistroEscaneo.fecha < datetime.combine(hoy, datetime.max.time())
     ).first()
+    
+    scan_type = ""
+    response_model_obj = None
 
     if registro_hoy:
         if registro_hoy.hora_salida is None:
@@ -613,7 +589,8 @@ async def record_scan(qr_id: int, db: Session = Depends(get_db)):
             registro_hoy.hora_salida = ahora
             db.commit()
             db.refresh(registro_hoy)
-            return await escaneo_to_response(registro_hoy, db)
+            scan_type = "SALIDA"
+            response_model_obj = await escaneo_to_response(registro_hoy, db)
         else:
             # Ya completó entrada y salida
             raise HTTPException(
@@ -634,8 +611,45 @@ async def record_scan(qr_id: int, db: Session = Depends(get_db)):
         db.add(nuevo_registro)
         db.commit()
         db.refresh(nuevo_registro)
+        scan_type = "ENTRADA"
+        response_model_obj = await escaneo_to_response(nuevo_registro, db)
 
-        return await escaneo_to_response(nuevo_registro, db)
+    # Después de un escaneo exitoso, guardamos el evento en el diccionario
+    if scan_type and employee:
+        global last_scan_events
+        message = f"{employee.name} ha registrado su {scan_type.lower()}."
+        last_scan_events[employee.id] = {
+            "message": message,
+            "type": scan_type,
+            "empleado_name": employee.name,
+            "timestamp": ahora.isoformat()
+        }
+        print(f"📬 Notificación preparada para empleado {employee.id}: {message}")
+
+    return response_model_obj
+
+# ============= ENDPOINT DE NOTIFICACIONES HTTP =============
+@app.get("/events/last-scan/{user_id}", response_model=Optional[ScanNotificationResponse], tags=["System"])
+async def get_last_scan_event(user_id: int):
+    """
+    ## 📬 Endpoint de polling para notificaciones de escaneo.
+
+    El frontend llama a este endpoint cada pocos segundos.
+    Si hay una notificación pendiente para el usuario, la devuelve y la elimina
+    para no volver a enviarla.
+    """
+    global last_scan_events
+    
+    # .pop() obtiene el valor y lo elimina del diccionario atómicamente.
+    event = last_scan_events.pop(user_id, None) 
+    
+    if event:
+        print(f"📤 Enviando notificación a usuario {user_id}: {event['message']}")
+        return event
+    
+    # Si no hay evento, FastAPI devolverá un cuerpo de respuesta `null`.
+    return None
+
 
 # ============= ENDPOINTS ADMINISTRATIVOS MEJORADOS =============
 
@@ -741,14 +755,6 @@ async def get_employee_scans(empleado_id: int, db: Session = Depends(get_db)):
 async def daily_report(fecha: str, db: Session = Depends(get_db)):
     """
     ## 📊 Genera reporte diario completo de asistencia con datos de empleados
-
-    **Formato de fecha:** YYYY-MM-DD (ejemplo: 2025-07-29)
-
-    **Incluye:**
-    - Estadísticas generales del día
-    - Detalle por empleado con información completa desde NestJS
-    - Duración de jornadas completadas
-    - Empleados sin salida registrada
     """
     try:
         fecha_obj = datetime.fromisoformat(fecha).date()
