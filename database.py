@@ -42,21 +42,7 @@ class RegistroEscaneo(Base):
     # Relación con QR code
     qr_code = relationship("QRCode", back_populates="escaneos")
 
-# Función para reiniciar la base de datos
-def reset_database():
-    """Elimina todas las tablas y las vuelve a crear"""
-    print("🔄 Reiniciando base de datos...")
-    
-    # Eliminar todas las tablas
-    Base.metadata.drop_all(bind=engine)
-    print("✅ Tablas eliminadas")
-    
-    # Crear las tablas nuevamente
-    Base.metadata.create_all(bind=engine)
-    print("✅ Tablas creadas")
-    print("🎉 Base de datos reiniciada correctamente")
-
-# Crear las tablas
+# Crear las tablas si no existen
 def create_tables():
     Base.metadata.create_all(bind=engine)
 

@@ -5,3 +5,4 @@ psycopg2-binary==2.9.9
 pydantic==2.5.0
 qrcode[pil]==7.4.2
 pillow==10.1.0
+httpx
