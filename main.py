@@ -5,7 +5,7 @@ import secrets
 import string
 from datetime import datetime
 from pydantic import BaseModel
-from database import get_db, reset_database, create_tables, QRCode, RegistroEscaneo
+from database import get_db, create_tables, QRCode, RegistroEscaneo
 from sqlalchemy import desc
 import httpx
 import asyncio
