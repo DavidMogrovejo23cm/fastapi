@@ -91,7 +91,6 @@ app = FastAPI(
 
 # Reiniciar la base de datos al iniciar (elimina esquema anterior)
 print("🚀 Iniciando aplicación integrada...")
-reset_database()
 
 # ============= MODELOS PYDANTIC =============
 
