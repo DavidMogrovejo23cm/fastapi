@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 import secrets
 import string
-from datetime import datetime
+from datetime import datetime, timedelta
 from pydantic import BaseModel
 from database import get_db, create_tables, QRCode, RegistroEscaneo
 from sqlalchemy import desc
@@ -34,7 +34,7 @@ app = FastAPI(
 
     Sistema integrado que consume el backend de NestJS para validar empleados antes de generar códigos QR.
     """,
-    version="2.1.0",
+    version="2.2.0",
     contact={
         "name": "Sistema de Asistencia QR Integrado",
         "email": "admin@empresa.com",
@@ -314,7 +314,7 @@ async def read_root():
     backend_status = await check_backend_status()
     return {
         "Hello": "QR Attendance API - Integrado con NestJS",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "swagger_docs": "/docs",
         "redoc_docs": "/redoc",
         "backend_nestjs": {
@@ -520,6 +520,7 @@ async def record_scan(qr_id: int, db: Session = Depends(get_db)):
     """
     ## 📱 Registra un escaneo del código QR (entrada o salida) con validación de empleado
     - Modificado para guardar el evento de escaneo en un "buzón" en memoria para notificaciones.
+    - **NUEVO**: Impide registrar la salida si no ha pasado al menos 1 minuto desde la entrada.
     """
 
     # Verificar que el QR existe y está activo
@@ -560,6 +561,16 @@ async def record_scan(qr_id: int, db: Session = Depends(get_db)):
 
     if registro_hoy:
         if registro_hoy.hora_salida is None:
+            # ---- INICIO DE LA MODIFICACIÓN ----
+            # Validar que ha pasado al menos 1 minuto desde la entrada
+            tiempo_desde_entrada = ahora - registro_hoy.hora_entrada
+            if tiempo_desde_entrada.total_seconds() < 60:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Debe esperar al menos 1 minuto después de la entrada para poder registrar la salida."
+                )
+            # ---- FIN DE LA MODIFICACIÓN ----
+
             # Registrar salida
             print(f"🚪 Registrando SALIDA para {employee.name}")
             registro_hoy.hora_salida = ahora
@@ -969,7 +980,7 @@ async def get_system_info(db: Session = Depends(get_db)):
 
     return {
         "app": "QR Attendance API - Integrado con NestJS",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "database": "PostgreSQL (Neon) + NestJS Backend",
         "qr_available": QR_AVAILABLE,
         "backend_integration": {
@@ -1294,7 +1305,7 @@ async def health_check(db: Session = Depends(get_db)):
     return {
         "status": overall_status,
         "timestamp": datetime.utcnow().isoformat(),
-        "version": "2.1.0",
+        "version": "2.2.0",
         "components": {
             "database": db_status,
             "nestjs_backend": backend_status,
