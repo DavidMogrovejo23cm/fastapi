@@ -593,14 +593,22 @@ async def record_scan(qr_id: int, db: Session = Depends(get_db)):
     # Después de un escaneo exitoso, guardamos el evento en el diccionario
     if scan_type and employee:
         global last_scan_events
+        
+        # Obtenemos todos los administradores para notificarles
+        all_users = await get_all_employees()
+        admin_users = [user for user in all_users if user.role == 'ADMIN']
+        
         message = f"{employee.name} ha registrado su {scan_type.lower()}."
-        last_scan_events[employee.id] = {
-            "message": message,
-            "type": scan_type,
-            "empleado_name": employee.name,
-            "timestamp": ahora.isoformat()
-        }
-        print(f"📬 Notificación preparada para empleado {employee.id}: {message}")
+        
+        # Preparamos la notificación para cada administrador
+        for admin in admin_users:
+            last_scan_events[admin.id] = {
+                "message": message,
+                "type": scan_type,
+                "empleado_name": employee.name,
+                "timestamp": ahora.isoformat()
+            }
+            print(f"📬 Notificación preparada para admin {admin.id} ({admin.name}): {message}")
 
     return response_model_obj
 
