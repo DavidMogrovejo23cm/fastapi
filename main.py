@@ -24,8 +24,8 @@ except ImportError:
 # URL del backend NestJS
 NESTJS_BACKEND_URL = "https://backtofastapi-production.up.railway.app"
 
-# "Buzón" en memoria mejorado para guardar una LISTA de eventos por ID de usuario.
-pending_notifications_mailbox: Dict[int, List[Dict[str, Any]]] = {}
+# "Buzón" en memoria para guardar el último evento de escaneo por ID de empleado.
+last_scan_events: Dict[int, Dict[str, Any]] = {}
 
 app = FastAPI(
     title="QR Attendance API - Integrado con NestJS",
@@ -34,7 +34,7 @@ app = FastAPI(
 
     Sistema integrado que consume el backend de NestJS para validar empleados antes de generar códigos QR.
     """,
-    version="2.2.0", # Versión actualizada por las mejoras
+    version="2.1.0",
     contact={
         "name": "Sistema de Asistencia QR Integrado",
         "email": "admin@empresa.com",
@@ -314,7 +314,7 @@ async def read_root():
     backend_status = await check_backend_status()
     return {
         "Hello": "QR Attendance API - Integrado con NestJS",
-        "version": "2.2.0",
+        "version": "2.1.0",
         "swagger_docs": "/docs",
         "redoc_docs": "/redoc",
         "backend_nestjs": {
@@ -325,8 +325,7 @@ async def read_root():
             "Generación de códigos QR por empleado validado",
             "Integración con backend NestJS para datos de empleados",
             "Registro de escaneos con información completa",
-            "Control de asistencia con validación de usuarios",
-            "Cola de notificaciones persistente (en memoria)"
+            "Control de asistencia con validación de usuarios"
         ]
     }
 
@@ -591,9 +590,9 @@ async def record_scan(qr_id: int, db: Session = Depends(get_db)):
         scan_type = "ENTRADA"
         response_model_obj = await escaneo_to_response(nuevo_registro, db)
 
-    # Después de un escaneo exitoso, guardamos el evento en el "buzón" de notificaciones
+    # Después de un escaneo exitoso, guardamos el evento en el diccionario
     if scan_type and employee:
-        global pending_notifications_mailbox
+        global last_scan_events
         
         # Obtenemos todos los administradores para notificarles
         all_users = await get_all_employees()
@@ -603,41 +602,37 @@ async def record_scan(qr_id: int, db: Session = Depends(get_db)):
         
         # Preparamos la notificación para cada administrador
         for admin in admin_users:
-            # Usamos setdefault para asegurarnos de que haya una lista para este admin.
-            # Luego, usamos .append() para AÑADIR la nueva notificación a la cola.
-            notification_event = {
+            last_scan_events[admin.id] = {
                 "message": message,
                 "type": scan_type,
                 "empleado_name": employee.name,
                 "timestamp": ahora.isoformat()
             }
-            pending_notifications_mailbox.setdefault(admin.id, []).append(notification_event)
-            print(f"📬 Notificación encolada para admin {admin.id} ({admin.name}): {message}")
+            print(f"📬 Notificación preparada para admin {admin.id} ({admin.name}): {message}")
 
     return response_model_obj
 
-
-# ============= ENDPOINT DE NOTIFICACIONES HTTP MEJORADO =============
-@app.get("/events/pending-notifications/{user_id}", response_model=List[ScanNotificationResponse], tags=["System"])
-async def get_pending_notifications(user_id: int):
+# ============= ENDPOINT DE NOTIFICACIONES HTTP =============
+@app.get("/events/last-scan/{user_id}", response_model=Optional[ScanNotificationResponse], tags=["System"])
+async def get_last_scan_event(user_id: int):
     """
-    ## 📬 Endpoint de polling para obtener la COLA de notificaciones de escaneo.
+    ## 📬 Endpoint de polling para notificaciones de escaneo.
 
     El frontend llama a este endpoint cada pocos segundos.
-    Si hay notificaciones pendientes para el usuario, devuelve la lista completa
-    y la elimina del servidor para no volver a enviarla.
+    Si hay una notificación pendiente para el usuario, la devuelve y la elimina
+    para no volver a enviarla.
     """
-    global pending_notifications_mailbox
+    global last_scan_events
 
-    # .pop() obtiene la lista completa de notificaciones y la elimina del diccionario.
-    # Si no hay notificaciones para ese user_id, devuelve una lista vacía [].
-    notifications = pending_notifications_mailbox.pop(user_id, [])
+    # .pop() obtiene el valor y lo elimina del diccionario atómicamente.
+    event = last_scan_events.pop(user_id, None)
 
-    if notifications:
-        print(f"📤 Enviando {len(notifications)} notificación(es) a usuario {user_id}")
-    
-    # FastAPI devolverá un cuerpo de respuesta `[]` si no hay eventos.
-    return notifications
+    if event:
+        print(f"📤 Enviando notificación a usuario {user_id}: {event['message']}")
+        return event
+
+    # Si no hay evento, FastAPI devolverá un cuerpo de respuesta `null`.
+    return None
 
 
 # ============= ENDPOINTS ADMINISTRATIVOS MEJORADOS =============
@@ -974,7 +969,7 @@ async def get_system_info(db: Session = Depends(get_db)):
 
     return {
         "app": "QR Attendance API - Integrado con NestJS",
-        "version": "2.2.0",
+        "version": "2.1.0",
         "database": "PostgreSQL (Neon) + NestJS Backend",
         "qr_available": QR_AVAILABLE,
         "backend_integration": {
@@ -1299,7 +1294,7 @@ async def health_check(db: Session = Depends(get_db)):
     return {
         "status": overall_status,
         "timestamp": datetime.utcnow().isoformat(),
-        "version": "2.2.0",
+        "version": "2.1.0",
         "components": {
             "database": db_status,
             "nestjs_backend": backend_status,
