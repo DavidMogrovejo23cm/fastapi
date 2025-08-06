@@ -1,6 +1,6 @@
 from typing import Union, Optional, List, Dict, Any
 from fastapi import FastAPI, Depends, HTTPException, status
-from fastapi.middleware.cors import CORSMiddleware  # AGREGADO: Importación CORS
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 import secrets
 import string
@@ -10,7 +10,7 @@ from database import get_db, create_tables, QRCode, RegistroEscaneo
 from sqlalchemy import desc
 import httpx
 import asyncio
-import traceback  # AGREGADO: Para mejor debugging
+import traceback
 
 # Importación condicional de qrcode
 try:
@@ -24,11 +24,8 @@ except ImportError:
 # URL del backend NestJS
 NESTJS_BACKEND_URL = "https://backtofastapi-production.up.railway.app"
 
-# --- INICIO DE MODIFICACIONES PARA NOTIFICACIONES HTTP ---
-# 1. "Buzón" en memoria para guardar el último evento de escaneo por ID de empleado.
-#    Formato: { empleado_id: { "message": "...", "type": "ENTRADA" | "SALIDA", "empleado_name": "..." } }
+# "Buzón" en memoria para guardar el último evento de escaneo por ID de empleado.
 last_scan_events: Dict[int, Dict[str, Any]] = {}
-# --- FIN DE MODIFICACIONES ---
 
 app = FastAPI(
     title="QR Attendance API - Integrado con NestJS",
@@ -36,27 +33,8 @@ app = FastAPI(
     ## 🎯 API para Control de Asistencia con Códigos QR - Integrada con Backend de Usuarios
 
     Sistema integrado que consume el backend de NestJS para validar empleados antes de generar códigos QR.
-
-    ### 🔧 Características principales:
-    - **Validación de empleados** desde backend NestJS
-    - **Generación de QRs únicos** por empleado válido
-    - **Registro automático** de entrada y salida
-    - **Un registro por día** por empleado
-    - **Reportes diarios** completos con información de empleados
-    - **Integración completa** con sistema de usuarios existente
-
-    ### 📊 Flujo de trabajo integrado:
-    1. **Validar empleado** en backend NestJS
-    2. **Generar QR** para empleado válido
-    3. **Primer escaneo** del día → ENTRADA
-    4. **Segundo escaneo** del día → SALIDA
-    5. **Consultar reportes** con datos de empleados
-
-    ### 🌐 Backend integrado:
-    - **NestJS Backend**: `https://backtofastapi-production.up.railway.app`
-    - **Endpoints consumidos**: `/user/{id}`, `/user`
     """,
-    version="2.0.0",
+    version="2.1.0",
     contact={
         "name": "Sistema de Asistencia QR Integrado",
         "email": "admin@empresa.com",
@@ -100,27 +78,38 @@ app = FastAPI(
 # ============= CONFIGURACIÓN CORS =============
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:4200",      # Angular development
-        "http://localhost:3000",      # React development (si aplica)
-        "https://tu-frontend-domain.com",  # Tu dominio de producción
-        "*"  # TEMPORAL: Permite todos los orígenes para debugging
-    ],
+    allow_origins=["http://localhost:4200", "https://tu-frontend-domain.com", "*"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Reiniciar la base de datos al iniciar (elimina esquema anterior)
 print("🚀 Iniciando aplicación integrada...")
+create_tables()
 
-# ============= MODELOS PYDANTIC =============
+# ============= MODELOS PYDANTIC ACTUALIZADOS =============
 
 class EmployeeInfo(BaseModel):
     id: int
     name: str
     email: str
     role: str
+    # CAMPOS AÑADIDOS para coincidir con el frontend de Angular
+    isActive: bool = True
+    createdAt: str = ""
+    firstName: Optional[str] = None
+    lastName: Optional[str] = None
+
+# NUEVO: Modelo para el registro de asistencia diario
+class UserAttendanceRecord(BaseModel):
+    hora_entrada: Optional[str] = None
+    hora_salida: Optional[str] = None
+    duracion_jornada: Optional[str] = None
+    status: str  # "Present", "Absent", "Completed"
+
+# NUEVO: Modelo combinado para la respuesta del nuevo endpoint
+class UserWithAttendance(EmployeeInfo):
+    attendance_today: UserAttendanceRecord
 
 class QRGenerationRequest(BaseModel):
     empleado_id: int
@@ -142,15 +131,15 @@ class EscaneoResponse(BaseModel):
     fecha: str
     hora_entrada: str
     hora_salida: Optional[str] = None
-    es_entrada: bool  # True si es entrada, False si es salida
-    duracion_jornada: Optional[str] = None  # Duración en formato "8h 30m" si hay salida
+    es_entrada: bool
+    duracion_jornada: Optional[str] = None
 
 class ValidationResponse(BaseModel):
     valid: bool
     message: str
     qr_data: Optional[dict] = None
     empleado_info: Optional[EmployeeInfo] = None
-    accion: Optional[str] = None  # "ENTRADA" o "SALIDA"
+    accion: Optional[str] = None
 
 class AttendanceStatsResponse(BaseModel):
     total_qrs: int
@@ -159,78 +148,65 @@ class AttendanceStatsResponse(BaseModel):
     escaneos_hoy: int
     backend_status: str
 
-# Nuevo modelo para la respuesta de notificación HTTP
 class ScanNotificationResponse(BaseModel):
     message: str
     type: str
     empleado_name: str
     timestamp: str
 
-# ============= FUNCIONES PARA CONSUMIR BACKEND NESTJS =============
+# ============= FUNCIONES PARA CONSUMIR BACKEND NESTJS (ACTUALIZADAS) =============
 
 async def get_employee_by_id(empleado_id: int) -> Optional[EmployeeInfo]:
     """Obtiene información del empleado desde el backend NestJS"""
     try:
-        print(f"🔍 Consultando empleado {empleado_id} en {NESTJS_BACKEND_URL}")
         async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{NESTJS_BACKEND_URL}/user/{empleado_id}",
-                timeout=10.0
-            )
-            
-            print(f"📡 Respuesta del backend: {response.status_code}")
-            
+            response = await client.get(f"{NESTJS_BACKEND_URL}/user/{empleado_id}", timeout=10.0)
             if response.status_code == 200:
                 user_data = response.json()
-                print(f"✅ Empleado encontrado: {user_data}")
+                # Compatibilidad con campos de frontend
+                full_name = user_data.get("name", "")
+                first_name = user_data.get("firstName") or (full_name.split(" ")[0] if " " in full_name else full_name)
+                last_name = user_data.get("lastName") or (" ".join(full_name.split(" ")[1:]) if " " in full_name else "")
+
                 return EmployeeInfo(
                     id=user_data["id"],
-                    name=user_data["name"],
+                    name=full_name,
+                    firstName=first_name,
+                    lastName=last_name,
                     email=user_data["email"],
-                    role=user_data["role"]
+                    role=user_data["role"],
+                    isActive=user_data.get("isActive", True),
+                    createdAt=user_data.get("createdAt", datetime.utcnow().isoformat())
                 )
-            elif response.status_code == 404:
-                print(f"❌ Empleado {empleado_id} no encontrado")
-                return None
-            else:
-                print(f"❌ Error obteniendo empleado {empleado_id}: {response.status_code} - {response.text}")
-                return None
-                
-    except httpx.TimeoutException:
-        print(f"⏰ Timeout obteniendo empleado {empleado_id}")
-        return None
+            return None
     except Exception as e:
         print(f"❌ Error de conexión obteniendo empleado {empleado_id}: {e}")
-        print(f"🔍 Traceback completo: {traceback.format_exc()}")
         return None
 
 async def get_all_employees() -> List[EmployeeInfo]:
     """Obtiene todos los empleados desde el backend NestJS"""
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{NESTJS_BACKEND_URL}/user",
-                timeout=15.0
-            )
-            
+            response = await client.get(f"{NESTJS_BACKEND_URL}/user", timeout=15.0)
             if response.status_code == 200:
                 users_data = response.json()
-                return [
-                    EmployeeInfo(
+                employee_list = []
+                for user in users_data:
+                    full_name = user.get("name", "")
+                    first_name = user.get("firstName") or (full_name.split(" ")[0] if " " in full_name else full_name)
+                    last_name = user.get("lastName") or (" ".join(full_name.split(" ")[1:]) if " " in full_name else "")
+                    employee_list.append(EmployeeInfo(
                         id=user["id"],
-                        name=user["name"],
+                        name=full_name,
+                        firstName=first_name,
+                        lastName=last_name,
                         email=user["email"],
-                        role=user["role"]
-                    )
-                    for user in users_data
-                ]
-            else:
-                print(f"❌ Error obteniendo todos los empleados: {response.status_code}")
-                return []
-                
-    except httpx.TimeoutException:
-        print("⏰ Timeout obteniendo todos los empleados")
-        return []
+                        role=user["role"],
+                        isActive=user.get("isActive", True),
+                        createdAt=user.get("createdAt", datetime.utcnow().isoformat())
+                    ))
+                return employee_list
+            return []
     except Exception as e:
         print(f"❌ Error de conexión obteniendo empleados: {e}")
         return []
@@ -243,12 +219,12 @@ async def check_backend_status() -> str:
                 f"{NESTJS_BACKEND_URL}/user",
                 timeout=5.0
             )
-            
+
             if response.status_code == 200:
                 return "CONNECTED"
             else:
                 return f"ERROR_{response.status_code}"
-                
+
     except httpx.TimeoutException:
         return "TIMEOUT"
     except Exception as e:
@@ -289,7 +265,7 @@ def generate_qr_code(qr_id: str) -> str:
 async def qr_to_response(qr_code: QRCode, db: Session) -> QRCodeResponse:
     """Convierte un QR code de la DB a respuesta con información del empleado"""
     total_escaneos = db.query(RegistroEscaneo).filter(RegistroEscaneo.qr_id == qr_code.id).count()
-    
+
     # Obtener información del empleado
     empleado_info = await get_employee_by_id(qr_code.empleado_id)
 
@@ -315,7 +291,7 @@ async def escaneo_to_response(escaneo: RegistroEscaneo, db: Session) -> EscaneoR
 
     # Determinar si es entrada (cuando se crea) o salida (cuando se actualiza)
     es_entrada = escaneo.hora_salida is None
-    
+
     # Obtener información del empleado
     empleado_info = await get_employee_by_id(escaneo.empleado_id)
 
@@ -338,7 +314,7 @@ async def read_root():
     backend_status = await check_backend_status()
     return {
         "Hello": "QR Attendance API - Integrado con NestJS",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "swagger_docs": "/docs",
         "redoc_docs": "/redoc",
         "backend_nestjs": {
@@ -365,13 +341,13 @@ async def get_employees():
 async def get_employee(empleado_id: int):
     """👤 Obtiene información de un empleado específico desde el backend NestJS"""
     employee = await get_employee_by_id(empleado_id)
-    
+
     if not employee:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Empleado con ID {empleado_id} no encontrado en el sistema"
         )
-    
+
     return employee
 
 @app.get("/employees/{empleado_id}/qr", response_model=Optional[QRCodeResponse], tags=["Employees"])
@@ -379,7 +355,7 @@ async def get_employee_qr(empleado_id: int, db: Session = Depends(get_db)):
     """🔍 Obtiene el QR código de un empleado específico si existe"""
     try:
         print(f"🔍 Procesando solicitud de QR para empleado {empleado_id}")
-        
+
         # Verificar que el empleado existe
         print(f"🔍 Verificando existencia del empleado {empleado_id}")
         employee = await get_employee_by_id(empleado_id)
@@ -389,23 +365,23 @@ async def get_employee_qr(empleado_id: int, db: Session = Depends(get_db)):
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Empleado con ID {empleado_id} no encontrado en el sistema"
             )
-        
+
         print(f"✅ Empleado encontrado: {employee.name}")
-        
+
         # Buscar QR existente
         print(f"🔍 Buscando QR existente para empleado {empleado_id}")
         existing_qr = db.query(QRCode).filter(
             QRCode.empleado_id == empleado_id,
             QRCode.activo == True
         ).first()
-        
+
         if existing_qr:
             print(f"✅ QR encontrado: ID {existing_qr.id}")
             return await qr_to_response(existing_qr, db)
         else:
             print(f"⚠️ No se encontró QR para empleado {empleado_id}")
             return None
-            
+
     except HTTPException:
         # Re-lanzar HTTPExceptions
         raise
@@ -428,13 +404,13 @@ async def generate_qr(request: QRGenerationRequest, db: Session = Depends(get_db
     # PASO 1: Validar que el empleado existe en el backend NestJS
     print(f"🔍 Validando empleado {request.empleado_id} en backend NestJS...")
     employee = await get_employee_by_id(request.empleado_id)
-    
+
     if not employee:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Empleado con ID {request.empleado_id} no encontrado en el sistema. Verifique que el empleado existe en el backend NestJS."
         )
-    
+
     print(f"✅ Empleado encontrado: {employee.name} ({employee.email})")
 
     # PASO 2: Verificar si ya existe un QR activo para este empleado
@@ -578,7 +554,7 @@ async def record_scan(qr_id: int, db: Session = Depends(get_db)):
         RegistroEscaneo.fecha >= datetime.combine(hoy, datetime.min.time()),
         RegistroEscaneo.fecha < datetime.combine(hoy, datetime.max.time())
     ).first()
-    
+
     scan_type = ""
     response_model_obj = None
 
@@ -639,14 +615,14 @@ async def get_last_scan_event(user_id: int):
     para no volver a enviarla.
     """
     global last_scan_events
-    
+
     # .pop() obtiene el valor y lo elimina del diccionario atómicamente.
-    event = last_scan_events.pop(user_id, None) 
-    
+    event = last_scan_events.pop(user_id, None)
+
     if event:
         print(f"📤 Enviando notificación a usuario {user_id}: {event['message']}")
         return event
-    
+
     # Si no hay evento, FastAPI devolverá un cuerpo de respuesta `null`.
     return None
 
@@ -671,13 +647,13 @@ async def get_all_qrs(
         query = query.filter(QRCode.activo == activo)
 
     qrs = query.offset(offset).limit(limit).all()
-    
+
     # Convertir a respuestas con información de empleados
     results = []
     for qr in qrs:
         qr_response = await qr_to_response(qr, db)
         results.append(qr_response)
-    
+
     return results
 
 @app.get("/admin/escaneos", response_model=List[EscaneoResponse], tags=["Administration"])
@@ -718,19 +694,19 @@ async def get_all_scans(
         query = query.filter(RegistroEscaneo.hora_salida.is_(None))
 
     escaneos = query.order_by(desc(RegistroEscaneo.fecha)).offset(offset).limit(limit).all()
-    
+
     # Convertir a respuestas con información de empleados
     results = []
     for escaneo in escaneos:
         escaneo_response = await escaneo_to_response(escaneo, db)
         results.append(escaneo_response)
-    
+
     return results
 
 @app.get("/admin/empleado/{empleado_id}/escaneos", response_model=List[EscaneoResponse], tags=["Administration"])
 async def get_employee_scans(empleado_id: int, db: Session = Depends(get_db)):
     """📋 Obtiene el historial completo de escaneos de un empleado específico con validación"""
-    
+
     # Validar que el empleado existe
     employee = await get_employee_by_id(empleado_id)
     if not employee:
@@ -738,7 +714,7 @@ async def get_employee_scans(empleado_id: int, db: Session = Depends(get_db)):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Empleado con ID {empleado_id} no encontrado en el sistema"
         )
-    
+
     escaneos = db.query(RegistroEscaneo).filter(
         RegistroEscaneo.empleado_id == empleado_id
     ).order_by(desc(RegistroEscaneo.fecha)).all()
@@ -748,7 +724,7 @@ async def get_employee_scans(empleado_id: int, db: Session = Depends(get_db)):
     for escaneo in escaneos:
         escaneo_response = await escaneo_to_response(escaneo, db)
         results.append(escaneo_response)
-    
+
     return results
 
 @app.get("/admin/reporte-diario/{fecha}", tags=["Reports"])
@@ -781,7 +757,7 @@ async def daily_report(fecha: str, db: Session = Depends(get_db)):
     for registro in registros:
         # Obtener información del empleado
         employee = await get_employee_by_id(registro.empleado_id)
-        
+
         duracion = None
         if registro.hora_salida:
             diff = registro.hora_salida - registro.hora_entrada
@@ -831,11 +807,11 @@ async def get_employees_without_exit(db: Session = Depends(get_db)):
     for registro in registros_sin_salida:
         # Obtener información del empleado desde NestJS
         employee = await get_employee_by_id(registro.empleado_id)
-        
+
         tiempo_transcurrido = datetime.utcnow() - registro.hora_entrada
         horas = int(tiempo_transcurrido.total_seconds() // 3600)
         minutos = int((tiempo_transcurrido.total_seconds() % 3600) // 60)
-        
+
         empleado_info = {
             "empleado_id": registro.empleado_id,
             "empleado_info": {
@@ -874,7 +850,7 @@ async def force_exit(registro_id: int, db: Session = Depends(get_db)):
 
     # Validar que el empleado aún existe
     employee = await get_employee_by_id(registro.empleado_id)
-    
+
     registro.hora_salida = datetime.utcnow()
     db.commit()
 
@@ -978,14 +954,14 @@ async def get_attendance_stats(db: Session = Depends(get_db)):
 async def get_system_info(db: Session = Depends(get_db)):
     """ℹ️ Información completa del sistema integrado con estadísticas detalladas"""
     stats = await get_attendance_stats(db)
-    
+
     # Obtener algunos empleados de muestra
     sample_employees = await get_all_employees()
     total_employees_backend = len(sample_employees)
 
     return {
         "app": "QR Attendance API - Integrado con NestJS",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "database": "PostgreSQL (Neon) + NestJS Backend",
         "qr_available": QR_AVAILABLE,
         "backend_integration": {
@@ -1007,6 +983,69 @@ async def get_system_info(db: Session = Depends(get_db)):
             "Reportes enriquecidos con información completa"
         ]
     }
+
+# ============= NUEVO ENDPOINT PARA EL DASHBOARD DE USUARIOS =============
+
+@app.get("/users/with-attendance", response_model=List[UserWithAttendance], tags=["Reports"])
+async def get_users_with_attendance_today(db: Session = Depends(get_db)):
+    """
+    ## 📋 Obtiene todos los empleados con su registro de asistencia de hoy.
+    Combina la información de empleados del backend NestJS con los registros de
+    entrada/salida de la base de datos local para el día actual. Ideal para dashboards.
+    """
+    all_employees = await get_all_employees()
+    if not all_employees:
+        return []
+
+    response_list = []
+    hoy = datetime.utcnow().date()
+
+    registros_hoy = db.query(RegistroEscaneo).filter(
+        RegistroEscaneo.fecha >= datetime.combine(hoy, datetime.min.time()),
+        RegistroEscaneo.fecha < datetime.combine(hoy, datetime.max.time())
+    ).all()
+
+    registros_dict = {registro.empleado_id: registro for registro in registros_hoy}
+
+    for employee in all_employees:
+        registro_hoy = registros_dict.get(employee.id)
+
+        attendance_record = UserAttendanceRecord(status="Absent")
+
+        if registro_hoy:
+            hora_entrada_str = registro_hoy.hora_entrada.strftime("%H:%M:%S") if registro_hoy.hora_entrada else None
+            hora_salida_str = registro_hoy.hora_salida.strftime("%H:%M:%S") if registro_hoy.hora_salida else None
+            duracion_str = None
+            status = "Present"
+
+            if registro_hoy.hora_salida:
+                duracion = registro_hoy.hora_salida - registro_hoy.hora_entrada
+                horas = int(duracion.total_seconds() // 3600)
+                minutos = int((duracion.total_seconds() % 3600) // 60)
+                duracion_str = f"{horas}h {minutos}m"
+                status = "Completed"
+
+            attendance_record = UserAttendanceRecord(
+                hora_entrada=hora_entrada_str,
+                hora_salida=hora_salida_str,
+                duracion_jornada=duracion_str,
+                status=status
+            )
+
+        user_with_attendance = UserWithAttendance(
+            id=employee.id,
+            name=employee.name,
+            firstName=employee.firstName,
+            lastName=employee.lastName,
+            email=employee.email,
+            role=employee.role,
+            isActive=employee.isActive,
+            createdAt=employee.createdAt,
+            attendance_today=attendance_record
+        )
+        response_list.append(user_with_attendance)
+
+    return response_list
 
 # ============= ENDPOINTS LEGACY MEJORADOS PARA COMPATIBILIDAD =============
 
@@ -1044,20 +1083,20 @@ async def legacy_validate(qr_id: str, db: Session = Depends(get_db)):
     try:
         qr_id_int = int(qr_id)
         validation = await validate_qr(qr_id_int, db)
-        
+
         if validation.valid:
             # Obtener registros para mostrar en el scanner
             registros = db.query(RegistroEscaneo).filter(
                 RegistroEscaneo.qr_id == qr_id_int
             ).order_by(desc(RegistroEscaneo.fecha)).all()
-            
+
             # Crear lista de escaneos previos (entradas y salidas)
             previous_scans = []
             for registro in registros:
                 previous_scans.append(registro.hora_entrada.isoformat())
                 if registro.hora_salida:
                     previous_scans.append(registro.hora_salida.isoformat())
-            
+
             # Obtener último registro para mostrar información
             ultimo_registro = registros[0] if registros else None
             usado_en = None
@@ -1066,7 +1105,7 @@ async def legacy_validate(qr_id: str, db: Session = Depends(get_db)):
                     usado_en = ultimo_registro.hora_salida.isoformat()
                 else:
                     usado_en = ultimo_registro.hora_entrada.isoformat()
-            
+
             return {
                 "valid": True,
                 "message": validation.message,
@@ -1113,28 +1152,28 @@ async def legacy_validate(qr_id: str, db: Session = Depends(get_db)):
 @app.post("/admin/sync-employees", tags=["Administration"])
 async def sync_employees_qrs(db: Session = Depends(get_db)):
     """🔄 Sincroniza empleados del backend NestJS con códigos QR existentes"""
-    
+
     # Obtener todos los empleados del backend
     all_employees = await get_all_employees()
     backend_status = await check_backend_status()
-    
+
     if backend_status != "CONNECTED":
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Backend NestJS no disponible: {backend_status}"
         )
-    
+
     # Obtener QRs existentes
     existing_qrs = db.query(QRCode).all()
     existing_employee_ids = {qr.empleado_id for qr in existing_qrs}
-    
+
     # Empleados en backend pero sin QR
     employees_without_qr = [emp for emp in all_employees if emp.id not in existing_employee_ids]
-    
+
     # QRs de empleados que ya no existen en backend
     backend_employee_ids = {emp.id for emp in all_employees}
     orphaned_qrs = [qr for qr in existing_qrs if qr.empleado_id not in backend_employee_ids]
-    
+
     return {
         "backend_status": backend_status,
         "total_employees_in_backend": len(all_employees),
@@ -1163,46 +1202,46 @@ async def sync_employees_qrs(db: Session = Depends(get_db)):
 @app.post("/admin/cleanup/orphaned-qrs", tags=["Administration"])
 async def cleanup_orphaned_qrs(db: Session = Depends(get_db)):
     """🧹 Limpia códigos QR de empleados que ya no existen en el backend NestJS"""
-    
+
     backend_status = await check_backend_status()
     if backend_status != "CONNECTED":
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Backend NestJS no disponible: {backend_status}"
         )
-    
+
     # Obtener empleados del backend
     all_employees = await get_all_employees()
     backend_employee_ids = {emp.id for emp in all_employees}
-    
+
     # Encontrar QRs huérfanos
     orphaned_qrs = db.query(QRCode).filter(
         ~QRCode.empleado_id.in_(backend_employee_ids)
     ).all()
-    
+
     cleaned_qrs = []
     total_scans_deleted = 0
-    
+
     for qr in orphaned_qrs:
         # Contar escaneos antes de eliminar
         scans_count = db.query(RegistroEscaneo).filter(RegistroEscaneo.qr_id == qr.id).count()
-        
+
         # Eliminar escaneos asociados
         db.query(RegistroEscaneo).filter(RegistroEscaneo.qr_id == qr.id).delete()
-        
+
         # Eliminar QR
         db.delete(qr)
-        
+
         cleaned_qrs.append({
             "qr_id": qr.id,
             "empleado_id": qr.empleado_id,
             "scans_deleted": scans_count
         })
-        
+
         total_scans_deleted += scans_count
-    
+
     db.commit()
-    
+
     return {
         "success": True,
         "message": f"Limpieza completada: {len(cleaned_qrs)} QRs huérfanos eliminados",
@@ -1217,17 +1256,17 @@ async def cleanup_orphaned_qrs(db: Session = Depends(get_db)):
 @app.get("/health", tags=["System"])
 async def health_check(db: Session = Depends(get_db)):
     """🏥 Endpoint de salud para monitoreo del sistema integrado"""
-    
+
     try:
         # Verificar conexión a base de datos
         db.execute("SELECT 1")
         db_status = "OK"
     except Exception as e:
         db_status = f"ERROR: {str(e)}"
-    
+
     # Verificar backend NestJS
     backend_status = await check_backend_status()
-    
+
     # Estadísticas rápidas
     try:
         total_qrs = db.query(QRCode).count()
@@ -1237,17 +1276,17 @@ async def health_check(db: Session = Depends(get_db)):
         total_qrs = 0
         total_escaneos = 0
         stats_status = f"ERROR: {str(e)}"
-    
+
     overall_status = "HEALTHY" if all([
         db_status == "OK",
         backend_status == "CONNECTED",
         stats_status == "OK"
     ]) else "DEGRADED"
-    
+
     return {
         "status": overall_status,
         "timestamp": datetime.utcnow().isoformat(),
-        "version": "2.0.0",
+        "version": "2.1.0",
         "components": {
             "database": db_status,
             "nestjs_backend": backend_status,
