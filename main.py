@@ -34,7 +34,7 @@ app = FastAPI(
 
     Sistema integrado que consume el backend de NestJS para validar empleados antes de generar códigos QR.
     """,
-    version="2.2.0",
+    version="2.3.0",
     contact={
         "name": "Sistema de Asistencia QR Integrado",
         "email": "admin@empresa.com",
@@ -114,6 +114,10 @@ class UserWithAttendance(EmployeeInfo):
 class QRGenerationRequest(BaseModel):
     empleado_id: int
 
+# NUEVO: Modelo para regenerar QR al hacer login
+class QRLoginRequest(BaseModel):
+    empleado_id: int
+
 class QRCodeResponse(BaseModel):
     id: int
     empleado_id: int
@@ -122,6 +126,7 @@ class QRCodeResponse(BaseModel):
     creado_en: str
     activo: bool
     total_escaneos: int
+    is_new: bool = False  # Indica si es un QR nuevo generado
 
 class EscaneoResponse(BaseModel):
     id: int
@@ -262,7 +267,7 @@ def generate_qr_code(qr_id: str) -> str:
         print(f"Error generando QR: {e}")
         return f"QR_ERROR_ID:{qr_id}"
 
-async def qr_to_response(qr_code: QRCode, db: Session) -> QRCodeResponse:
+async def qr_to_response(qr_code: QRCode, db: Session, is_new: bool = False) -> QRCodeResponse:
     """Convierte un QR code de la DB a respuesta con información del empleado"""
     total_escaneos = db.query(RegistroEscaneo).filter(RegistroEscaneo.qr_id == qr_code.id).count()
 
@@ -276,7 +281,8 @@ async def qr_to_response(qr_code: QRCode, db: Session) -> QRCodeResponse:
         qr_code_base64=qr_code.qr_code_base64,
         creado_en=qr_code.creado_en.isoformat(),
         activo=qr_code.activo,
-        total_escaneos=total_escaneos
+        total_escaneos=total_escaneos,
+        is_new=is_new
     )
 
 async def escaneo_to_response(escaneo: RegistroEscaneo, db: Session) -> EscaneoResponse:
@@ -307,6 +313,57 @@ async def escaneo_to_response(escaneo: RegistroEscaneo, db: Session) -> EscaneoR
         duracion_jornada=duracion_jornada
     )
 
+# ============= FUNCIONES PARA REGENERAR QR =============
+
+async def regenerate_qr_for_employee(empleado_id: int, db: Session) -> QRCodeResponse:
+    """
+    Regenera un nuevo código QR para un empleado:
+    1. Desactiva el QR anterior si existe
+    2. Crea un nuevo QR activo
+    3. Mantiene el historial de escaneos del QR anterior
+    """
+    print(f"🔄 Regenerando QR para empleado {empleado_id}")
+    
+    # Verificar que el empleado existe
+    employee = await get_employee_by_id(empleado_id)
+    if not employee:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Empleado con ID {empleado_id} no encontrado en el sistema"
+        )
+
+    # Desactivar QR anterior si existe (no eliminar para mantener historial)
+    existing_qr = db.query(QRCode).filter(
+        QRCode.empleado_id == empleado_id,
+        QRCode.activo == True
+    ).first()
+
+    if existing_qr:
+        print(f"🔒 Desactivando QR anterior (ID: {existing_qr.id}) para empleado {empleado_id}")
+        existing_qr.activo = False
+        db.commit()
+
+    # Crear nuevo QR
+    print(f"🆕 Creando nuevo QR para empleado {empleado_id}")
+    new_qr = QRCode(
+        empleado_id=empleado_id,
+        qr_code_base64="temp",  # Temporal
+        activo=True
+    )
+
+    db.add(new_qr)
+    db.commit()
+    db.refresh(new_qr)
+
+    # Generar el código QR usando el nuevo ID
+    qr_code_base64 = generate_qr_code(new_qr.id)
+    new_qr.qr_code_base64 = qr_code_base64
+    db.commit()
+    db.refresh(new_qr)
+
+    print(f"✅ Nuevo QR generado exitosamente para {employee.name} (ID: {new_qr.id})")
+    return await qr_to_response(new_qr, db, is_new=True)
+
 # ============= ENDPOINTS =============
 
 @app.get("/", tags=["System"])
@@ -314,7 +371,7 @@ async def read_root():
     backend_status = await check_backend_status()
     return {
         "Hello": "QR Attendance API - Integrado con NestJS",
-        "version": "2.2.0",
+        "version": "2.3.0",
         "swagger_docs": "/docs",
         "redoc_docs": "/redoc",
         "backend_nestjs": {
@@ -325,7 +382,8 @@ async def read_root():
             "Generación de códigos QR por empleado validado",
             "Integración con backend NestJS para datos de empleados",
             "Registro de escaneos con información completa",
-            "Control de asistencia con validación de usuarios"
+            "Control de asistencia con validación de usuarios",
+            "NUEVO: Regeneración automática de QR en cada login"
         ]
     }
 
@@ -352,7 +410,7 @@ async def get_employee(empleado_id: int):
 
 @app.get("/employees/{empleado_id}/qr", response_model=Optional[QRCodeResponse], tags=["Employees"])
 async def get_employee_qr(empleado_id: int, db: Session = Depends(get_db)):
-    """🔍 Obtiene el QR código de un empleado específico si existe"""
+    """🔍 Obtiene el QR código activo de un empleado específico si existe"""
     try:
         print(f"🔍 Procesando solicitud de QR para empleado {empleado_id}")
 
@@ -368,18 +426,18 @@ async def get_employee_qr(empleado_id: int, db: Session = Depends(get_db)):
 
         print(f"✅ Empleado encontrado: {employee.name}")
 
-        # Buscar QR existente
-        print(f"🔍 Buscando QR existente para empleado {empleado_id}")
+        # Buscar QR activo existente
+        print(f"🔍 Buscando QR activo para empleado {empleado_id}")
         existing_qr = db.query(QRCode).filter(
             QRCode.empleado_id == empleado_id,
             QRCode.activo == True
         ).first()
 
         if existing_qr:
-            print(f"✅ QR encontrado: ID {existing_qr.id}")
+            print(f"✅ QR activo encontrado: ID {existing_qr.id}")
             return await qr_to_response(existing_qr, db)
         else:
-            print(f"⚠️ No se encontró QR para empleado {empleado_id}")
+            print(f"⚠️ No se encontró QR activo para empleado {empleado_id}")
             return None
 
     except HTTPException:
@@ -393,12 +451,35 @@ async def get_employee_qr(empleado_id: int, db: Session = Depends(get_db)):
             detail=f"Error interno del servidor: {str(e)}"
         )
 
-# ============= ENDPOINTS DE QR CODES INTEGRADOS =============
+# ============= NUEVO ENDPOINT PARA LOGIN/REGENERAR QR =============
+
+@app.post("/qr/login", response_model=QRCodeResponse, tags=["QR Codes"])
+async def generate_qr_on_login(request: QRLoginRequest, db: Session = Depends(get_db)):
+    """
+    ## 🔄 Regenera código QR al hacer login (NUEVO)
+    
+    Este endpoint se debe llamar cada vez que un empleado se loguea en la aplicación.
+    Automáticamente:
+    1. Desactiva el QR anterior del empleado
+    2. Genera un nuevo QR único
+    3. Mantiene el historial de escaneos anteriores
+    """
+    print(f"🔑 Login detectado para empleado {request.empleado_id}, regenerando QR...")
+    
+    # Regenerar QR para el empleado
+    new_qr = await regenerate_qr_for_employee(request.empleado_id, db)
+    
+    print(f"✅ QR regenerado exitosamente en login para empleado {request.empleado_id}")
+    return new_qr
+
+# ============= ENDPOINTS DE QR CODES INTEGRADOS (MODIFICADOS) =============
 
 @app.post("/qr/generate", response_model=QRCodeResponse, tags=["QR Codes"])
 async def generate_qr(request: QRGenerationRequest, db: Session = Depends(get_db)):
     """
     ## 🎯 Genera un nuevo código QR para un empleado (con validación en NestJS)
+    
+    NOTA: Para regenerar QR en login, usar el endpoint /qr/login
     """
 
     # PASO 1: Validar que el empleado existe en el backend NestJS
@@ -420,7 +501,7 @@ async def generate_qr(request: QRGenerationRequest, db: Session = Depends(get_db
     ).first()
 
     if existing_qr:
-        print(f"📋 QR existente encontrado para empleado {request.empleado_id}")
+        print(f"📋 QR activo existente encontrado para empleado {request.empleado_id}")
         # Devolver el QR existente con información actualizada del empleado
         return await qr_to_response(existing_qr, db)
 
@@ -444,7 +525,7 @@ async def generate_qr(request: QRGenerationRequest, db: Session = Depends(get_db
     db.refresh(db_qr)
 
     print(f"✅ QR generado exitosamente para {employee.name}")
-    return await qr_to_response(db_qr, db)
+    return await qr_to_response(db_qr, db, is_new=True)
 
 @app.get("/qr/{qr_id}/validate", response_model=ValidationResponse, tags=["QR Codes"])
 async def validate_qr(qr_id: int, db: Session = Depends(get_db)):
@@ -465,7 +546,7 @@ async def validate_qr(qr_id: int, db: Session = Depends(get_db)):
         employee = await get_employee_by_id(qr_code.empleado_id)
         return ValidationResponse(
             valid=False,
-            message="Código QR desactivado",
+            message="Código QR desactivado - Posiblemente se generó uno nuevo",
             empleado_info=employee,
             qr_data={
                 "empleado_id": qr_code.empleado_id,
@@ -535,7 +616,7 @@ async def record_scan(qr_id: int, db: Session = Depends(get_db)):
     if not qr_code.activo:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Código QR desactivado"
+            detail="Código QR desactivado - Es posible que se haya generado uno nuevo para este empleado"
         )
 
     # Validar que el empleado aún existe en el backend
@@ -980,7 +1061,7 @@ async def get_system_info(db: Session = Depends(get_db)):
 
     return {
         "app": "QR Attendance API - Integrado con NestJS",
-        "version": "2.2.0",
+        "version": "2.3.0",
         "database": "PostgreSQL (Neon) + NestJS Backend",
         "qr_available": QR_AVAILABLE,
         "backend_integration": {
@@ -999,7 +1080,8 @@ async def get_system_info(db: Session = Depends(get_db)):
             "Integración completa con backend de usuarios",
             "Registro de múltiples escaneos con datos de empleados",
             "Control de asistencia con validación en tiempo real",
-            "Reportes enriquecidos con información completa"
+            "Reportes enriquecidos con información completa",
+            "NUEVO: Regeneración automática de QR en cada login"
         ]
     }
 
@@ -1182,21 +1264,21 @@ async def sync_employees_qrs(db: Session = Depends(get_db)):
             detail=f"Backend NestJS no disponible: {backend_status}"
         )
 
-    # Obtener QRs existentes
-    existing_qrs = db.query(QRCode).all()
+    # Obtener QRs existentes activos
+    existing_qrs = db.query(QRCode).filter(QRCode.activo == True).all()
     existing_employee_ids = {qr.empleado_id for qr in existing_qrs}
 
-    # Empleados en backend pero sin QR
+    # Empleados en backend pero sin QR activo
     employees_without_qr = [emp for emp in all_employees if emp.id not in existing_employee_ids]
 
-    # QRs de empleados que ya no existen en backend
+    # QRs activos de empleados que ya no existen en backend
     backend_employee_ids = {emp.id for emp in all_employees}
     orphaned_qrs = [qr for qr in existing_qrs if qr.empleado_id not in backend_employee_ids]
 
     return {
         "backend_status": backend_status,
         "total_employees_in_backend": len(all_employees),
-        "total_qrs_in_system": len(existing_qrs),
+        "total_active_qrs_in_system": len(existing_qrs),
         "employees_without_qr": [
             {
                 "id": emp.id,
@@ -1233,9 +1315,10 @@ async def cleanup_orphaned_qrs(db: Session = Depends(get_db)):
     all_employees = await get_all_employees()
     backend_employee_ids = {emp.id for emp in all_employees}
 
-    # Encontrar QRs huérfanos
+    # Encontrar QRs huérfanos (solo los activos)
     orphaned_qrs = db.query(QRCode).filter(
-        ~QRCode.empleado_id.in_(backend_employee_ids)
+        ~QRCode.empleado_id.in_(backend_employee_ids),
+        QRCode.activo == True
     ).all()
 
     cleaned_qrs = []
@@ -1245,29 +1328,25 @@ async def cleanup_orphaned_qrs(db: Session = Depends(get_db)):
         # Contar escaneos antes de eliminar
         scans_count = db.query(RegistroEscaneo).filter(RegistroEscaneo.qr_id == qr.id).count()
 
-        # Eliminar escaneos asociados
-        db.query(RegistroEscaneo).filter(RegistroEscaneo.qr_id == qr.id).delete()
-
-        # Eliminar QR
-        db.delete(qr)
-
+        # En lugar de eliminar, desactivar el QR para mantener historial
+        qr.activo = False
+        
         cleaned_qrs.append({
             "qr_id": qr.id,
             "empleado_id": qr.empleado_id,
-            "scans_deleted": scans_count
+            "action": "deactivated",
+            "scans_preserved": scans_count
         })
-
-        total_scans_deleted += scans_count
 
     db.commit()
 
     return {
         "success": True,
-        "message": f"Limpieza completada: {len(cleaned_qrs)} QRs huérfanos eliminados",
+        "message": f"Limpieza completada: {len(cleaned_qrs)} QRs huérfanos desactivados (historial preservado)",
         "cleaned_qrs": cleaned_qrs,
-        "total_qrs_deleted": len(cleaned_qrs),
-        "total_scans_deleted": total_scans_deleted,
-        "backend_status": backend_status
+        "total_qrs_deactivated": len(cleaned_qrs),
+        "backend_status": backend_status,
+        "note": "Los QRs fueron desactivados en lugar de eliminados para preservar el historial de escaneos"
     }
 
 # ============= ENDPOINT DE SALUD PARA MONITOREO =============
@@ -1289,10 +1368,12 @@ async def health_check(db: Session = Depends(get_db)):
     # Estadísticas rápidas
     try:
         total_qrs = db.query(QRCode).count()
+        total_qrs_activos = db.query(QRCode).filter(QRCode.activo == True).count()
         total_escaneos = db.query(RegistroEscaneo).count()
         stats_status = "OK"
     except Exception as e:
         total_qrs = 0
+        total_qrs_activos = 0
         total_escaneos = 0
         stats_status = f"ERROR: {str(e)}"
 
@@ -1305,7 +1386,7 @@ async def health_check(db: Session = Depends(get_db)):
     return {
         "status": overall_status,
         "timestamp": datetime.utcnow().isoformat(),
-        "version": "2.2.0",
+        "version": "2.3.0",
         "components": {
             "database": db_status,
             "nestjs_backend": backend_status,
@@ -1314,9 +1395,15 @@ async def health_check(db: Session = Depends(get_db)):
         },
         "metrics": {
             "total_qrs": total_qrs,
+            "total_qrs_activos": total_qrs_activos,
             "total_escaneos": total_escaneos
         },
-        "backend_url": NESTJS_BACKEND_URL
+        "backend_url": NESTJS_BACKEND_URL,
+        "new_features": [
+            "Regeneración automática de QR en login",
+            "Preservación de historial en limpieza de QRs huérfanos",
+            "Endpoint /qr/login para regenerar QR automáticamente"
+        ]
     }
 
 # ============= CONFIGURACIÓN PARA RAILWAY =============
@@ -1329,4 +1416,6 @@ if __name__ == "__main__":
     print(f"🌐 Backend NestJS: {NESTJS_BACKEND_URL}")
     print(f"📱 QR disponible: {QR_AVAILABLE}")
     print(f"🔧 CORS configurado para localhost:4200")
+    print(f"🆕 Funcionalidad de regeneración de QR en login activada")
     uvicorn.run(app, host="0.0.0.0", port=port)
+            "
