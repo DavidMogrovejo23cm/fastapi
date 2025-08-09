@@ -1322,10 +1322,9 @@ async def cleanup_orphaned_qrs(db: Session = Depends(get_db)):
     ).all()
 
     cleaned_qrs = []
-    total_scans_deleted = 0
 
     for qr in orphaned_qrs:
-        # Contar escaneos antes de eliminar
+        # Contar escaneos antes de desactivar
         scans_count = db.query(RegistroEscaneo).filter(RegistroEscaneo.qr_id == qr.id).count()
 
         # En lugar de eliminar, desactivar el QR para mantener historial
@@ -1418,4 +1417,3 @@ if __name__ == "__main__":
     print(f"🔧 CORS configurado para localhost:4200")
     print(f"🆕 Funcionalidad de regeneración de QR en login activada")
     uvicorn.run(app, host="0.0.0.0", port=port)
-            "
