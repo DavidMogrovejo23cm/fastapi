@@ -1713,12 +1713,13 @@ async def get_system_info(db: Session = Depends(get_db)):
             "escaneos_hoy": stats.escaneos_hoy
         },
         "new_features": [
-            "🔍 Búsqueda avanzada con filtros múltiples",
-            "📊 Reportes detallados por empleado",
-            "📅 Estadísticas semanales y mensuales",
-            "⏰ Filtros por períodos personalizables",
-            "📈 Dashboard con métricas en tiempo real",
-            "🎯 API endpoints optimizados para frontend Angular"
+            "🔍 Búsqueda avanzada con filtros múltiples por texto, período, estado y rol",
+            "📊 Reportes detallados individuales con cálculo de horas y estadísticas",
+            "📅 Estadísticas semanales y mensuales con tendencias de asistencia",
+            "⏰ Períodos personalizables: hoy, ayer, semana, mes, rango personalizado",
+            "📈 Dashboard con métricas en tiempo real y comparativas",
+            "🎯 API optimizada para frontend Angular con paginación",
+            "🔄 Endpoints de sincronización mejorados con validación completa"
         ],
         "legacy_features": [
             "Generación de QR por empleado validado en NestJS",
@@ -2001,22 +2002,118 @@ async def health_check(db: Session = Depends(get_db)):
 if __name__ == "__main__":
     import uvicorn
     import os
+    
+    # Configuración del puerto para Railway
     port = int(os.environ.get("PORT", 8000))
-    print(f"🚀 Iniciando servidor en puerto {port}")
-    print(f"🌐 Backend NestJS: {NESTJS_BACKEND_URL}")
-    print(f"📱 QR disponible: {QR_AVAILABLE}")
-    print(f"🔧 CORS configurado para localhost:4200")
-    print(f"🆕 Funcionalidad de regeneración de QR en login activada")
-    print(f"🔍 Nuevas funcionalidades de búsqueda y filtros disponibles")
-    print(f"📊 Reportes detallados y estadísticas implementados")
-    print(f"📅 Sistema de estadísticas semanales y mensuales activo")
-    print(f"🎯 Version 3.0.0 - Sistema completo de asistencia con análisis avanzado")
-    uvicorn.run(app, host="0.0.0.0", port=port)
-            message="Código QR no encontrado"
+    
+    # Banner de inicio
+    print("=" * 80)
+    print("🚀 INICIANDO QR ATTENDANCE API v3.0.0 - INTEGRADO CON NESTJS")
+    print("=" * 80)
+    print(f"🌐 Servidor iniciando en puerto: {port}")
+    print(f"🔗 Backend NestJS: {NESTJS_BACKEND_URL}")
+    print(f"📱 Generación QR disponible: {'✅ SÍ' if QR_AVAILABLE else '❌ NO (usando placeholders)'}")
+    print(f"🔧 CORS configurado para: localhost:4200, production domains")
+    print(f"🗄️ Base de datos: PostgreSQL (Neon)")
+    print()
+    
+    # Funcionalidades principales
+    print("📋 FUNCIONALIDADES PRINCIPALES:")
+    print("   ✅ Generación/regeneración automática de códigos QR")
+    print("   ✅ Integración completa con backend NestJS")
+    print("   ✅ Registro de entrada/salida con validación")
+    print("   ✅ Sistema de notificaciones en tiempo real")
+    print("   ✅ Control de tiempo mínimo entre entrada/salida")
+    print()
+    
+    # Nuevas funcionalidades v3.0.0
+    print("🆕 NUEVAS FUNCIONALIDADES v3.0.0:")
+    print("   🔍 Búsqueda avanzada con filtros múltiples")
+    print("   📊 Reportes detallados por empleado")
+    print("   📅 Estadísticas semanales y mensuales")
+    print("   ⏰ Períodos personalizables (hoy, semana, mes, custom)")
+    print("   📈 Dashboard con métricas en tiempo real")
+    print("   🎯 API optimizada para frontend Angular")
+    print("   🔄 Endpoints de sincronización mejorados")
+    print()
+    
+    # Endpoints disponibles
+    print("🌐 ENDPOINTS PRINCIPALES:")
+    print("   📋 GET  /employees - Lista de empleados")
+    print("   🎯 POST /qr/generate - Generar QR")
+    print("   🔑 POST /qr/login - Regenerar QR en login")
+    print("   📱 POST /qr/{id}/scan - Registrar escaneo")
+    print("   ✅ GET  /qr/{id}/validate - Validar QR")
+    print("   🔍 GET  /attendance/search - Búsqueda avanzada")
+    print("   📊 GET  /attendance/report/{id} - Reporte empleado")
+    print("   📅 GET  /attendance/weekly-stats - Stats semanales")
+    print("   📈 GET  /attendance/monthly-stats - Stats mensuales")
+    print("   📊 GET  /attendance/dashboard-stats - Dashboard")
+    print("   👥 GET  /users/with-attendance - Lista con asistencia")
+    print("   📬 GET  /events/last-scan/{id} - Notificaciones")
+    print("   🏥 GET  /health - Estado del sistema")
+    print("   ℹ️  GET  /info - Información detallada")
+    print()
+    
+    # Endpoints administrativos
+    print("🔧 ENDPOINTS ADMINISTRATIVOS:")
+    print("   📋 GET  /admin/qrs - Todos los QRs")
+    print("   📊 GET  /admin/escaneos - Todos los escaneos")
+    print("   📅 GET  /admin/reporte-diario/{fecha} - Reporte diario")
+    print("   ⚠️  GET  /admin/empleados/sin-salida - Sin salida")
+    print("   🚪 POST /admin/registro/{id}/forzar-salida - Forzar salida")
+    print("   🔄 PUT  /admin/qr/{id}/toggle - Activar/desactivar QR")
+    print("   🗑️  DEL  /admin/qr/{id} - Eliminar QR")
+    print("   🔄 POST /admin/sync-employees - Sincronizar empleados")
+    print("   🧹 POST /admin/cleanup/orphaned-qrs - Limpiar QRs huérfanos")
+    print()
+    
+    # Endpoints legacy
+    print("🔄 ENDPOINTS LEGACY (compatibilidad):")
+    print("   📱 POST /tokens/{id}/record_scan - Scanner legacy")
+    print("   ✅ GET  /tokens/{id}/validate - Validación legacy")
+    print()
+    
+    # Documentación
+    print("📚 DOCUMENTACIÓN:")
+    print("   📖 Swagger UI: /docs")
+    print("   📘 ReDoc: /redoc")
+    print()
+    
+    # Variables de entorno importantes
+    print("🔧 CONFIGURACIÓN DE ENTORNO:")
+    print(f"   PORT: {port}")
+    print(f"   NESTJS_BACKEND_URL: {NESTJS_BACKEND_URL}")
+    print(f"   QR_AVAILABLE: {QR_AVAILABLE}")
+    print()
+    
+    # Información de compatibilidad
+    print("🎯 COMPATIBILIDAD:")
+    print("   ✅ Frontend Angular (localhost:4200)")
+    print("   ✅ Railway deployment")
+    print("   ✅ PostgreSQL (Neon)")
+    print("   ✅ Scanner QR existente (endpoints legacy)")
+    print("   ✅ Sistema de notificaciones polling")
+    print()
+    
+    print("=" * 80)
+    print("🎊 SISTEMA LISTO - QR ATTENDANCE API v3.0.0 INICIADO EXITOSAMENTE")
+    print("=" * 80)
+    print()
+    
+    # Iniciar servidor
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=port,
+        log_level="info",
+        access_log=True
+    )False,
+            (message="Código QR no encontrado"
         )
 
     if not qr_code.activo:
         # Intentar obtener info del empleado aunque el QR esté desactivado
         employee = await get_employee_by_id(qr_code.empleado_id)
         return ValidationResponse(
-            valid=False,
+            valid=)
