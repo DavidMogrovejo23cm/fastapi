@@ -90,14 +90,45 @@ app = FastAPI(
 # ============= CONFIGURACIÓN CORS =============
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:4200", "https://tu-frontend-domain.com", "*"],
+    allow_origins=[
+        "http://localhost:4200",
+        "https://localhost:4200",
+        "http://127.0.0.1:4200",
+        "https://127.0.0.1:4200",
+        "https://tu-frontend-domain.com",
+        "*"
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Accept",
+        "Accept-Language",
+        "Content-Language",
+        "Content-Type",
+        "Authorization",
+        "X-Requested-With",
+        "Origin",
+        "Access-Control-Request-Method",
+        "Access-Control-Request-Headers",
+    ],
 )
 
 print("🚀 Iniciando aplicación integrada...")
 create_tables()
+
+# ============= MIDDLEWARE PARA MANEJO DE ERRORES =============
+
+@app.middleware("http")
+async def catch_exceptions_middleware(request, call_next):
+    try:
+        return await call_next(request)
+    except Exception as e:
+        print(f"❌ Error no manejado: {e}")
+        return {
+            "error": "Internal server error",
+            "message": str(e),
+            "status": "error"
+        }
 
 # ============= NUEVOS ENUMS Y MODELOS PARA FILTROS =============
 
@@ -1016,75 +1047,109 @@ async def get_dashboard_attendance_stats(db: Session = Depends(get_db)):
     
     Resumen rápido para el dashboard con datos de hoy, esta semana y este mes
     """
-    
-    today = datetime.utcnow().date()
-    
-    # Estadísticas de hoy
-    today_start = datetime.combine(today, datetime.min.time())
-    today_end = datetime.combine(today, datetime.max.time())
-    
-    registros_hoy = db.query(RegistroEscaneo).filter(
-        RegistroEscaneo.fecha >= today_start,
-        RegistroEscaneo.fecha <= today_end
-    ).all()
-    
-    empleados_activos_hoy = len(set(r.empleado_id for r in registros_hoy))
-    
-    # Estadísticas de esta semana
-    days_since_monday = today.weekday()
-    week_start = today - timedelta(days=days_since_monday)
-    week_start_dt = datetime.combine(week_start, datetime.min.time())
-    
-    registros_semana = db.query(RegistroEscaneo).filter(
-        RegistroEscaneo.fecha >= week_start_dt,
-        RegistroEscaneo.fecha <= today_end
-    ).all()
-    
-    empleados_activos_semana = len(set(r.empleado_id for r in registros_semana))
-    
-    # Estadísticas del mes
-    month_start = today.replace(day=1)
-    month_start_dt = datetime.combine(month_start, datetime.min.time())
-    
-    registros_mes = db.query(RegistroEscaneo).filter(
-        RegistroEscaneo.fecha >= month_start_dt,
-        RegistroEscaneo.fecha <= today_end
-    ).all()
-    
-    empleados_activos_mes = len(set(r.empleado_id for r in registros_mes))
-    
-    # Empleados total
-    total_empleados = len(await get_all_employees())
-    
-    # Calcular horas
-    horas_hoy, _ = calculate_worked_hours(registros_hoy)
-    horas_semana, _ = calculate_worked_hours(registros_semana)
-    horas_mes, _ = calculate_worked_hours(registros_mes)
-    
-    return {
-        "today": {
-            "empleados_activos": empleados_activos_hoy,
-            "total_empleados": total_empleados,
-            "porcentaje_asistencia": round((empleados_activos_hoy / total_empleados * 100) if total_empleados > 0 else 0, 2),
-            "horas_trabajadas": horas_hoy,
-            "total_registros": len(registros_hoy)
-        },
-        "this_week": {
-            "empleados_activos": empleados_activos_semana,
-            "total_empleados": total_empleados,
-            "porcentaje_asistencia": round((empleados_activos_semana / total_empleados * 100) if total_empleados > 0 else 0, 2),
-            "horas_trabajadas": horas_semana,
-            "total_registros": len(registros_semana)
-        },
-        "this_month": {
-            "empleados_activos": empleados_activos_mes,
-            "total_empleados": total_empleados,
-            "porcentaje_asistencia": round((empleados_activos_mes / total_empleados * 100) if total_empleados > 0 else 0, 2),
-            "horas_trabajadas": horas_mes,
-            "total_registros": len(registros_mes)
-        },
-        "last_update": datetime.utcnow().isoformat()
-    }
+    try:
+        today = datetime.utcnow().date()
+        
+        # Estadísticas de hoy
+        today_start = datetime.combine(today, datetime.min.time())
+        today_end = datetime.combine(today, datetime.max.time())
+        
+        registros_hoy = db.query(RegistroEscaneo).filter(
+            RegistroEscaneo.fecha >= today_start,
+            RegistroEscaneo.fecha <= today_end
+        ).all()
+        
+        empleados_activos_hoy = len(set(r.empleado_id for r in registros_hoy))
+        
+        # Estadísticas de esta semana
+        days_since_monday = today.weekday()
+        week_start = today - timedelta(days=days_since_monday)
+        week_start_dt = datetime.combine(week_start, datetime.min.time())
+        
+        registros_semana = db.query(RegistroEscaneo).filter(
+            RegistroEscaneo.fecha >= week_start_dt,
+            RegistroEscaneo.fecha <= today_end
+        ).all()
+        
+        empleados_activos_semana = len(set(r.empleado_id for r in registros_semana))
+        
+        # Estadísticas del mes
+        month_start = today.replace(day=1)
+        month_start_dt = datetime.combine(month_start, datetime.min.time())
+        
+        registros_mes = db.query(RegistroEscaneo).filter(
+            RegistroEscaneo.fecha >= month_start_dt,
+            RegistroEscaneo.fecha <= today_end
+        ).all()
+        
+        empleados_activos_mes = len(set(r.empleado_id for r in registros_mes))
+        
+        # Empleados total (con fallback en caso de error del backend)
+        try:
+            total_empleados = len(await get_all_employees())
+        except Exception as e:
+            print(f"⚠️ Error obteniendo empleados del backend: {e}")
+            total_empleados = 0
+        
+        # Calcular horas
+        horas_hoy, _ = calculate_worked_hours(registros_hoy)
+        horas_semana, _ = calculate_worked_hours(registros_semana)
+        horas_mes, _ = calculate_worked_hours(registros_mes)
+        
+        return {
+            "today": {
+                "empleados_activos": empleados_activos_hoy,
+                "total_empleados": total_empleados,
+                "porcentaje_asistencia": round((empleados_activos_hoy / total_empleados * 100) if total_empleados > 0 else 0, 2),
+                "horas_trabajadas": horas_hoy,
+                "total_registros": len(registros_hoy)
+            },
+            "this_week": {
+                "empleados_activos": empleados_activos_semana,
+                "total_empleados": total_empleados,
+                "porcentaje_asistencia": round((empleados_activos_semana / total_empleados * 100) if total_empleados > 0 else 0, 2),
+                "horas_trabajadas": horas_semana,
+                "total_registros": len(registros_semana)
+            },
+            "this_month": {
+                "empleados_activos": empleados_activos_mes,
+                "total_empleados": total_empleados,
+                "porcentaje_asistencia": round((empleados_activos_mes / total_empleados * 100) if total_empleados > 0 else 0, 2),
+                "horas_trabajadas": horas_mes,
+                "total_registros": len(registros_mes)
+            },
+            "last_update": datetime.utcnow().isoformat(),
+            "status": "ok"
+        }
+    except Exception as e:
+        print(f"❌ Error en dashboard stats: {e}")
+        # Devolver datos por defecto en caso de error
+        return {
+            "today": {
+                "empleados_activos": 0,
+                "total_empleados": 0,
+                "porcentaje_asistencia": 0,
+                "horas_trabajadas": "0h 0m",
+                "total_registros": 0
+            },
+            "this_week": {
+                "empleados_activos": 0,
+                "total_empleados": 0,
+                "porcentaje_asistencia": 0,
+                "horas_trabajadas": "0h 0m",
+                "total_registros": 0
+            },
+            "this_month": {
+                "empleados_activos": 0,
+                "total_empleados": 0,
+                "porcentaje_asistencia": 0,
+                "horas_trabajadas": "0h 0m",
+                "total_registros": 0
+            },
+            "last_update": datetime.utcnow().isoformat(),
+            "status": "error",
+            "error": str(e)
+        }
 
 # ============= ENDPOINT ACTUALIZADO PARA EL DASHBOARD DE USUARIOS =============
 
@@ -1274,6 +1339,24 @@ async def health_check(db: Session = Depends(get_db)):
             "total_escaneos": total_escaneos
         },
         "backend_url": NESTJS_BACKEND_URL
+    }
+
+# ============= ENDPOINT SPEAKERS (COMPATIBILITY) =============
+
+@app.get("/speakers", tags=["System"])
+async def get_speakers():
+    """🔊 Endpoint de compatibilidad para speakers (datos mock)"""
+    return {
+        "speakers": [
+            {
+                "id": 1,
+                "name": "Default Speaker",
+                "status": "active",
+                "volume": 80
+            }
+        ],
+        "total": 1,
+        "status": "ok"
     }
 
 # ============= CONFIGURACIÓN PARA RAILWAY =============
