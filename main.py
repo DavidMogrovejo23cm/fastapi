@@ -216,14 +216,14 @@ class ScanNotificationResponse(BaseModel):
 # ============= NUEVOS MODELOS PARA FILTROS Y REPORTES =============
 
 class AttendanceFilter(BaseModel):
-    search: Optional[str] = Field(None, description="Buscar por nombre o email del empleado")
-    period: Optional[TimePeriod] = Field(TimePeriod.today, description="Período de tiempo")
-    start_date: Optional[str] = Field(None, description="Fecha de inicio (YYYY-MM-DD) para período personalizado")
-    end_date: Optional[str] = Field(None, description="Fecha de fin (YYYY-MM-DD) para período personalizado")
-    status: Optional[str] = Field(None, description="Filtrar por estado: Present, Absent, Completed")
-    role: Optional[str] = Field(None, description="Filtrar por rol del empleado")
-    limit: Optional[int] = Field(50, description="Número máximo de resultados", ge=1, le=200)
-    offset: Optional[int] = Field(0, description="Número de registros a omitir", ge=0)
+    search: Optional[str] = None
+    period: Optional[TimePeriod] = TimePeriod.today
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    status: Optional[str] = None
+    role: Optional[str] = None
+    limit: Optional[int] = 50
+    offset: Optional[int] = 0
 
 class AttendanceReport(BaseModel):
     empleado_id: int
@@ -916,21 +916,36 @@ async def search_attendance(
     end_date: Optional[str] = None,
     status: Optional[str] = None,
     role: Optional[str] = None,
-    limit: int = Field(50, ge=1, le=200),
-    offset: int = Field(0, ge=0),
+    limit: int = 50,
+    offset: int = 0,
     db: Session = Depends(get_db)
 ):
     """
     ## 🔍 Búsqueda avanzada de asistencia con filtros
     
     Permite buscar empleados y filtrar por:
-    - Texto de búsqueda (nombre o email)
+    - Texto de búsqueda (nombre o email)  
     - Período de tiempo (hoy, esta semana, este mes, etc.)
     - Estado de asistencia
     - Rol del empleado
+    
+    Parámetros:
+    - search: Buscar por nombre o email del empleado
+    - period: Período de tiempo 
+    - start_date: Fecha de inicio (YYYY-MM-DD) para período personalizado
+    - end_date: Fecha de fin (YYYY-MM-DD) para período personalizado
+    - status: Filtrar por estado: Present, Absent, Completed
+    - role: Filtrar por rol del empleado
+    - limit: Número máximo de resultados (1-200)
+    - offset: Número de registros a omitir
     """
     
-    print(f"🔍 Búsqueda de asistencia con filtros: search={search}, period={period}, status={status}, role={role}")
+    try:
+        # Validar parámetros
+        if limit < 1 or limit > 200:
+            limit = 50
+        if offset < 0:
+            offset = 0
     
     # Obtener rango de fechas
     start_date_obj, end_date_obj = get_date_range(period, start_date, end_date)
