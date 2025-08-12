@@ -875,6 +875,407 @@ async def get_last_scan_event(user_id: int):
     # Si no hay evento, FastAPI devolverá un cuerpo de respuesta `null`.
     return None
 
+# ============= NUEVOS ENDPOINTS DE BÚSQUEDA Y FILTROS =============
+
+@app.get("/attendance/search", response_model=List[UserWithAttendance], tags=["Attendance"])
+async def search_attendance(
+    search: Optional[str] = None,
+    period: Optional[TimePeriod] = TimePeriod.today,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    status: Optional[str] = None,
+    role: Optional[str] = None,
+    limit: int = Field(50, ge=1, le=200),
+    offset: int = Field(0, ge=0),
+    db: Session = Depends(get_db)
+):
+    """
+    ## 🔍 Búsqueda avanzada de asistencia con filtros
+    
+    Permite buscar empleados y filtrar por:
+    - Texto de búsqueda (nombre o email)
+    - Período de tiempo (hoy, esta semana, este mes, etc.)
+    - Estado de asistencia
+    - Rol del empleado
+    """
+    
+    print(f"🔍 Búsqueda de asistencia con filtros: search={search}, period={period}, status={status}, role={role}")
+    
+    # Obtener rango de fechas
+    start_date_obj, end_date_obj = get_date_range(period, start_date, end_date)
+    
+    # Obtener todos los empleados del backend
+    all_employees = await get_all_employees()
+    if not all_employees:
+        return []
+    
+    # Filtrar empleados por búsqueda de texto
+    filtered_employees = all_employees
+    
+    if search:
+        search_term = search.lower()
+        filtered_employees = [
+            emp for emp in all_employees 
+            if (search_term in emp.name.lower() or 
+                search_term in emp.email.lower() or
+                (emp.firstName and search_term in emp.firstName.lower()) or
+                (emp.lastName and search_term in emp.lastName.lower()))
+        ]
+    
+    # Filtrar por rol
+    if role:
+        filtered_employees = [emp for emp in filtered_employees if emp.role == role]
+    
+    # Obtener registros de asistencia para el rango de fechas
+    start_datetime = datetime.combine(start_date_obj, datetime.min.time())
+    end_datetime = datetime.combine(end_date_obj, datetime.max.time())
+    
+    registros_periodo = db.query(RegistroEscaneo).filter(
+        RegistroEscaneo.fecha >= start_datetime,
+        RegistroEscaneo.fecha <= end_datetime
+    ).all()
+    
+    # Crear diccionario de registros por empleado
+    registros_dict = {}
+    for registro in registros_periodo:
+        if registro.empleado_id not in registros_dict:
+            registros_dict[registro.empleado_id] = []
+        registros_dict[registro.empleado_id].append(registro)
+    
+    # Construir respuesta
+    response_list = []
+    
+    for employee in filtered_employees:
+        registros_empleado = registros_dict.get(employee.id, [])
+        
+        # Determinar estado general del empleado en el período
+        if registros_empleado:
+            registros_completos = [r for r in registros_empleado if r.hora_salida is not None]
+            registros_pendientes = [r for r in registros_empleado if r.hora_salida is None]
+            
+            if registros_pendientes:
+                employee_status = "Present"  # Tiene entrada sin salida
+            elif registros_completos:
+                employee_status = "Completed"  # Tiene registros completos
+            else:
+                employee_status = "Present"  # Tiene algún registro
+        else:
+            employee_status = "Absent"  # No tiene registros
+        
+        # Filtrar por estado si se especifica
+        if status and employee_status != status:
+            continue
+        
+        # Calcular información de asistencia para el período
+        if registros_empleado:
+            # Obtener el registro más reciente para mostrar horas
+            ultimo_registro = max(registros_empleado, key=lambda x: x.fecha)
+            
+            hora_entrada_str = ultimo_registro.hora_entrada.strftime("%H:%M:%S")
+            hora_salida_str = ultimo_registro.hora_salida.strftime("%H:%M:%S") if ultimo_registro.hora_salida else None
+            
+            # Calcular duración total en el período
+            total_horas_str, _ = calculate_worked_hours(registros_empleado)
+            
+            attendance_record = UserAttendanceRecord(
+                hora_entrada=hora_entrada_str,
+                hora_salida=hora_salida_str,
+                duracion_jornada=total_horas_str,
+                status=employee_status
+            )
+        else:
+            attendance_record = UserAttendanceRecord(status="Absent")
+        
+        user_with_attendance = UserWithAttendance(
+            id=employee.id,
+            name=employee.name,
+            firstName=employee.firstName,
+            lastName=employee.lastName,
+            email=employee.email,
+            role=employee.role,
+            isActive=employee.isActive,
+            createdAt=employee.createdAt,
+            attendance_today=attendance_record
+        )
+        
+        response_list.append(user_with_attendance)
+    
+    # Aplicar paginación
+    start_index = offset
+    end_index = start_index + limit
+    paginated_results = response_list[start_index:end_index]
+    
+    print(f"✅ Búsqueda completada: {len(paginated_results)} resultados de {len(response_list)} total")
+    
+    return paginated_results
+
+@app.get("/attendance/dashboard-stats", tags=["Reports"])
+async def get_dashboard_attendance_stats(db: Session = Depends(get_db)):
+    """
+    ## 📊 Estadísticas del dashboard principal
+    
+    Resumen rápido para el dashboard con datos de hoy, esta semana y este mes
+    """
+    
+    today = datetime.utcnow().date()
+    
+    # Estadísticas de hoy
+    today_start = datetime.combine(today, datetime.min.time())
+    today_end = datetime.combine(today, datetime.max.time())
+    
+    registros_hoy = db.query(RegistroEscaneo).filter(
+        RegistroEscaneo.fecha >= today_start,
+        RegistroEscaneo.fecha <= today_end
+    ).all()
+    
+    empleados_activos_hoy = len(set(r.empleado_id for r in registros_hoy))
+    
+    # Estadísticas de esta semana
+    days_since_monday = today.weekday()
+    week_start = today - timedelta(days=days_since_monday)
+    week_start_dt = datetime.combine(week_start, datetime.min.time())
+    
+    registros_semana = db.query(RegistroEscaneo).filter(
+        RegistroEscaneo.fecha >= week_start_dt,
+        RegistroEscaneo.fecha <= today_end
+    ).all()
+    
+    empleados_activos_semana = len(set(r.empleado_id for r in registros_semana))
+    
+    # Estadísticas del mes
+    month_start = today.replace(day=1)
+    month_start_dt = datetime.combine(month_start, datetime.min.time())
+    
+    registros_mes = db.query(RegistroEscaneo).filter(
+        RegistroEscaneo.fecha >= month_start_dt,
+        RegistroEscaneo.fecha <= today_end
+    ).all()
+    
+    empleados_activos_mes = len(set(r.empleado_id for r in registros_mes))
+    
+    # Empleados total
+    total_empleados = len(await get_all_employees())
+    
+    # Calcular horas
+    horas_hoy, _ = calculate_worked_hours(registros_hoy)
+    horas_semana, _ = calculate_worked_hours(registros_semana)
+    horas_mes, _ = calculate_worked_hours(registros_mes)
+    
+    return {
+        "today": {
+            "empleados_activos": empleados_activos_hoy,
+            "total_empleados": total_empleados,
+            "porcentaje_asistencia": round((empleados_activos_hoy / total_empleados * 100) if total_empleados > 0 else 0, 2),
+            "horas_trabajadas": horas_hoy,
+            "total_registros": len(registros_hoy)
+        },
+        "this_week": {
+            "empleados_activos": empleados_activos_semana,
+            "total_empleados": total_empleados,
+            "porcentaje_asistencia": round((empleados_activos_semana / total_empleados * 100) if total_empleados > 0 else 0, 2),
+            "horas_trabajadas": horas_semana,
+            "total_registros": len(registros_semana)
+        },
+        "this_month": {
+            "empleados_activos": empleados_activos_mes,
+            "total_empleados": total_empleados,
+            "porcentaje_asistencia": round((empleados_activos_mes / total_empleados * 100) if total_empleados > 0 else 0, 2),
+            "horas_trabajadas": horas_mes,
+            "total_registros": len(registros_mes)
+        },
+        "last_update": datetime.utcnow().isoformat()
+    }
+
+# ============= ENDPOINT ACTUALIZADO PARA EL DASHBOARD DE USUARIOS =============
+
+@app.get("/users/with-attendance", response_model=List[UserWithAttendance], tags=["Reports"])
+async def get_users_with_attendance_today(db: Session = Depends(get_db)):
+    """
+    ## 📋 Obtiene todos los empleados con su registro de asistencia de hoy.
+    Combina la información de empleados del backend NestJS con los registros de
+    entrada/salida de la base de datos local para el día actual. Ideal para dashboards.
+    """
+    all_employees = await get_all_employees()
+    if not all_employees:
+        return []
+
+    response_list = []
+    hoy = datetime.utcnow().date()
+
+    registros_hoy = db.query(RegistroEscaneo).filter(
+        RegistroEscaneo.fecha >= datetime.combine(hoy, datetime.min.time()),
+        RegistroEscaneo.fecha < datetime.combine(hoy, datetime.max.time())
+    ).all()
+
+    registros_dict = {registro.empleado_id: registro for registro in registros_hoy}
+
+    for employee in all_employees:
+        registro_hoy = registros_dict.get(employee.id)
+
+        attendance_record = UserAttendanceRecord(status="Absent")
+
+        if registro_hoy:
+            hora_entrada_str = registro_hoy.hora_entrada.strftime("%H:%M:%S") if registro_hoy.hora_entrada else None
+            hora_salida_str = registro_hoy.hora_salida.strftime("%H:%M:%S") if registro_hoy.hora_salida else None
+            duracion_str = None
+            status = "Present"
+
+            if registro_hoy.hora_salida:
+                duracion = registro_hoy.hora_salida - registro_hoy.hora_entrada
+                horas = int(duracion.total_seconds() // 3600)
+                minutos = int((duracion.total_seconds() % 3600) // 60)
+                duracion_str = f"{horas}h {minutos}m"
+                status = "Completed"
+
+            attendance_record = UserAttendanceRecord(
+                hora_entrada=hora_entrada_str,
+                hora_salida=hora_salida_str,
+                duracion_jornada=duracion_str,
+                status=status
+            )
+
+        user_with_attendance = UserWithAttendance(
+            id=employee.id,
+            name=employee.name,
+            firstName=employee.firstName,
+            lastName=employee.lastName,
+            email=employee.email,
+            role=employee.role,
+            isActive=employee.isActive,
+            createdAt=employee.createdAt,
+            attendance_today=attendance_record
+        )
+        response_list.append(user_with_attendance)
+
+    return response_list
+
+# ============= ESTADÍSTICAS MEJORADAS =============
+
+@app.get("/stats", response_model=AttendanceStatsResponse, tags=["System"])
+async def get_attendance_stats(db: Session = Depends(get_db)):
+    """📈 Obtiene estadísticas generales del sistema de asistencia integrado"""
+
+    # Contar totales
+    total_qrs = db.query(QRCode).count()
+    total_escaneos = db.query(RegistroEscaneo).count()
+
+    # Empleados únicos con QR
+    empleados_registrados = db.query(QRCode.empleado_id).distinct().count()
+
+    # Escaneos de hoy
+    hoy = datetime.utcnow().date()
+    escaneos_hoy = db.query(RegistroEscaneo).filter(
+        RegistroEscaneo.fecha >= datetime.combine(hoy, datetime.min.time()),
+        RegistroEscaneo.fecha < datetime.combine(hoy, datetime.max.time())
+    ).count()
+
+    # Estado del backend
+    backend_status = await check_backend_status()
+
+    return AttendanceStatsResponse(
+        total_qrs=total_qrs,
+        total_escaneos=total_escaneos,
+        empleados_registrados=empleados_registrados,
+        escaneos_hoy=escaneos_hoy,
+        backend_status=backend_status
+    )
+
+@app.get("/info", tags=["System"])
+async def get_system_info(db: Session = Depends(get_db)):
+    """ℹ️ Información completa del sistema integrado con estadísticas detalladas"""
+    stats = await get_attendance_stats(db)
+
+    # Obtener algunos empleados de muestra
+    sample_employees = await get_all_employees()
+    total_employees_backend = len(sample_employees)
+
+    return {
+        "app": "QR Attendance API - Integrado con NestJS",
+        "version": "3.0.0",
+        "database": "PostgreSQL (Neon) + NestJS Backend",
+        "qr_available": QR_AVAILABLE,
+        "backend_integration": {
+            "nestjs_url": NESTJS_BACKEND_URL,
+            "status": stats.backend_status,
+            "total_employees_in_backend": total_employees_backend
+        },
+        "attendance_stats": {
+            "total_qrs": stats.total_qrs,
+            "total_escaneos": stats.total_escaneos,
+            "empleados_registrados": stats.empleados_registrados,
+            "escaneos_hoy": stats.escaneos_hoy
+        },
+        "new_features": [
+            "🔍 Búsqueda avanzada con filtros múltiples por texto, período, estado y rol",
+            "📊 Reportes detallados individuales con cálculo de horas y estadísticas",
+            "📅 Estadísticas semanales y mensuales con tendencias de asistencia",
+            "⏰ Períodos personalizables: hoy, ayer, semana, mes, rango personalizado",
+            "📈 Dashboard con métricas en tiempo real y comparativas",
+            "🎯 API optimizada para frontend Angular con paginación",
+            "🔄 Endpoints de sincronización mejorados con validación completa"
+        ],
+        "legacy_features": [
+            "Generación de QR por empleado validado en NestJS",
+            "Integración completa con backend de usuarios",
+            "Registro de múltiples escaneos con datos de empleados",
+            "Control de asistencia con validación en tiempo real",
+            "Reportes enriquecidos con información completa",
+            "Regeneración automática de QR en cada login"
+        ]
+    }
+
+# ============= ENDPOINT DE SALUD PARA MONITOREO =============
+
+@app.get("/health", tags=["System"])
+async def health_check(db: Session = Depends(get_db)):
+    """🏥 Endpoint de salud para monitoreo del sistema integrado"""
+
+    try:
+        # Verificar conexión a base de datos
+        db.execute("SELECT 1")
+        db_status = "OK"
+    except Exception as e:
+        db_status = f"ERROR: {str(e)}"
+
+    # Verificar backend NestJS
+    backend_status = await check_backend_status()
+
+    # Estadísticas rápidas
+    try:
+        total_qrs = db.query(QRCode).count()
+        total_qrs_activos = db.query(QRCode).filter(QRCode.activo == True).count()
+        total_escaneos = db.query(RegistroEscaneo).count()
+        stats_status = "OK"
+    except Exception as e:
+        total_qrs = 0
+        total_qrs_activos = 0
+        total_escaneos = 0
+        stats_status = f"ERROR: {str(e)}"
+
+    overall_status = "HEALTHY" if all([
+        db_status == "OK",
+        backend_status == "CONNECTED",
+        stats_status == "OK"
+    ]) else "DEGRADED"
+
+    return {
+        "status": overall_status,
+        "timestamp": datetime.utcnow().isoformat(),
+        "version": "3.0.0",
+        "components": {
+            "database": db_status,
+            "nestjs_backend": backend_status,
+            "statistics": stats_status,
+            "qr_generation": "OK" if QR_AVAILABLE else "LIMITED"
+        },
+        "metrics": {
+            "total_qrs": total_qrs,
+            "total_qrs_activos": total_qrs_activos,
+            "total_escaneos": total_escaneos
+        },
+        "backend_url": NESTJS_BACKEND_URL
+    }
+
 # ============= CONFIGURACIÓN PARA RAILWAY =============
 
 if __name__ == "__main__":
